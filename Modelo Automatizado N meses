@@ -1,0 +1,131 @@
+using Gurobi
+using JuMP, Gurobi, Plots, HiGHS 
+
+# Dados
+custos = [8, 12, 15, 18]
+v0 = 40
+pot_max = [10, 15, 20, 15]
+mes = 3
+num_termicas = 4
+num_hidreletricas = 1
+num_cenarios = 2
+# CH = [0 5 ; 0 5]  
+CH = [0, 5]
+print(CH)
+demanda = 50
+
+function primeiro_mes(num_cortes, fmi, λ, vs, custos, demanda, num_hidreletricas, num_termicas, pot_max, v0, num_cenarios)
+    modelo = Model(Gurobi.Optimizer)
+
+    @variable(modelo, 0 <= termicas[1, j = 1:num_termicas] <= pot_max[j])
+    @variable(modelo, 0 <= hidreletrica[1, 1])
+    @variable(modelo, 0 <= volume[1, 1])
+    @variable(modelo, Z >= 0)
+
+    @constraint(modelo, sum(termicas[1, j] for j in 1:num_termicas) + sum(hidreletrica[1, 1]) == demanda)
+    @constraint(modelo, volume[1, 1] == v0 - hidreletrica[1, 1])
+    print(num_cortes)
+    for e ∈ 1:num_cortes
+        Z_cenario = 0.0
+        for k in 1:num_cenarios
+            Z_cenario += (fmi[e, k] + λ[e, k] * (volume[1, 1] - vs[e])) 
+        end
+        @constraint(modelo, Z >= (Z_cenario/num_cenarios))
+    end
+
+    @objective(modelo, Min, sum(custos[j] * termicas[1, j] for j in 1:num_termicas) + Z)
+    print(modelo)
+
+    optimize!(modelo)
+    return value(volume[1, 1]), objective_value(modelo), value(Z)
+end
+
+function meses_seguintes(mes_novo,chuva, num_termicas, num_hidreletricas, volume_antigo, custos, demanda, pot_max)
+    modelo = Model(Gurobi.Optimizer)
+
+    @variable(modelo, 0 <= termicas_i[mes_novo, j = 1:num_termicas] <= pot_max[j])
+    @variable(modelo, hidreletrica_i[mes_novo, 1:num_hidreletricas] >= 0)
+    @variable(modelo, volume_i[mes_novo,1:num_hidreletricas] >= 0)
+    
+
+    @constraint(modelo, sum(termicas_i[mes_novo,j] for j in 1:num_termicas) + hidreletrica_i[mes_novo,1] == demanda)
+
+    global rest = @constraint(modelo, volume_i[mes_novo,1] == volume_antigo - hidreletrica_i[mes_novo,1] + chuva)
+    
+   # readline()
+    @objective(modelo, Min, sum(custos[j] * termicas_i[mes_novo,j] for j in 1:num_termicas))
+   # print(modelo)  
+    optimize!(modelo)
+    status = termination_status(modelo)
+    local λ_novo 
+    λ_novo = dual(rest)
+    print(λ_novo)
+    return λ_novo, objective_value(modelo)
+end
+
+function resolve_problema_todo(custos, demanda, num_hidreletricas, num_termicas, pot_max, mes, v0, num_cenarios)
+    m = mes
+    n = num_cenarios
+    fmi_cont = -100.0 
+    Z = rand(0,1)*100000
+    Z_vet = []
+    # vs = Float64[] #v estrela (volume no final do mês 1 com um certo ve passado)
+    vs = Array{Float64}(undef,m,n)
+    fmi = zeros(Float64, 0, num_cenarios) #valor do custo em cada mês
+    λ = zeros(Float64, 0, num_cenarios)   
+
+    num_cortes = 0
+
+    while abs(fmi_cont - Z) > 1e-6
+        saidas1 = primeiro_mes(num_cortes, fmi, λ, vs, custos, demanda, num_hidreletricas, num_termicas, pot_max, v0, num_cenarios)
+        global fm1 =  saidas1[2]
+        push!(vs, saidas1[1])
+        Z = saidas1[3]
+        push!(Z_vet, Z)
+        println("Saídas do Primeiro Mês:")
+        println("Volume Final: ", saidas1[1])
+        println("Custo Total: ", saidas1[2])
+        println("Z : ", saidas1[3])
+        println()
+        #readline()
+        fmi_novo = zeros(Float64, 1, num_cenarios)
+        λ_novo = zeros(Float64, 1, num_cenarios)
+        #saidas = zeros(num_cenarios)
+        for mes_novo in 2:mes
+            for k in 1:num_cenarios
+                saidas2 = meses_seguintes(mes_novo,CH[k], num_termicas, num_hidreletricas, vs[mes_novo-1,num_cortes + 1], custos, demanda, pot_max)
+                fmi_novo[mes_novo, k] = saidas2[2]
+                λ_novo[mes_novo, k] = saidas2[1]
+                # push!(matriz_Z, Z_vet)
+                println("Saídas do Mês $mes_novo para o cenário $k:")
+                println("Multiplicadores de Lagrange $k (λ): ", saidas2[1])
+                println("Custo Total: ", saidas2[2])
+                println()
+            #   print("\n Valor da função do mes 2 int $k \n ", fmi_novo)
+            end
+        end
+
+        fmi = vcat(fmi, fmi_novo)
+      #  print("\n Valor da função do mes $mes_atual \n ", fm2)
+
+        λ = vcat(λ, λ_novo)
+        # fm2_cont = fm2_novo[1, 1]
+        fmi_cont = sum(fmi_novo)/num_cenarios
+       # print("\n Valor da função do mes $mes_atual \n ", fmi_cont)
+        num_cortes += 1
+      #  readline()
+      global fm1 =  saidas1[2]
+    end
+
+    return Z, fmi, vs, λ,fm1
+end
+
+saidas3 = resolve_problema_todo(custos, demanda, num_hidreletricas, num_termicas, pot_max, mes, v0, num_cenarios)
+println("Resultado Final:")
+println("Custo Total: ", saidas3[5] )
+println("Z: ", saidas3[1])
+println("fmi: ", saidas3[2])
+println("vs: ", saidas3[3])
+
+println("λ: ", saidas3[4])
+
