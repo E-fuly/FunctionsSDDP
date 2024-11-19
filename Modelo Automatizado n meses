@@ -1,0 +1,223 @@
+using Gurobi
+using JuMP, Gurobi, Plots, HiGHS 
+
+# Dados
+custos = [8, 12, 15, 18]
+v0 = 40
+pot_max = [10, 15, 20, 15]
+num_mes = 3
+num_termicas = 4
+num_hidreletricas = 1
+num_cenarios = 1
+# CH = [0 5 ; 0 5]  
+CH = [0, 5]
+# print(CH)
+demanda = 50
+
+function primeiro_mes(num_cortes, fmi, λ, vs, custos, demanda, num_hidreletricas, num_termicas, pot_max, v0, num_cenarios)
+    modelo = Model(Gurobi.Optimizer)
+
+    @variable(modelo, 0 <= termicas[1, j = 1:num_termicas] <= pot_max[j])
+    @variable(modelo, 0 <= hidreletrica[1, 1])
+    @variable(modelo, 0 <= volume[1, 1])
+    @variable(modelo, Z >= 0)
+
+    @constraint(modelo, sum(termicas[1, j] for j in 1:num_termicas) + sum(hidreletrica[1, 1]) == demanda)
+    @constraint(modelo, volume[1, 1] == v0 - hidreletrica[1, 1])
+
+    # print(num_cortes)
+    # for e ∈ 1:num_cortes
+    #     Z_cenario = 0.0
+    #     # for k in 1:num_cenarios
+    #         Z_cenario += (fmi[2,e+1] + λ[1,e+1] * (volume[1, 1] - vs[1,e+1])) 
+    #     # end
+    #     @constraint(modelo, Z >= (Z_cenario/num_cenarios))
+    # end
+
+    for e ∈ 1:num_cortes
+        @constraint(modelo, Z >= fmi[2,e+1] + λ[1,e+1] * (volume[1, 1] - vs[1,e+1]))
+    end
+
+
+    @objective(modelo, Min, sum(custos[j] * termicas[1, j] for j in 1:num_termicas) + Z)
+    print(modelo)
+
+    optimize!(modelo)
+    return value(volume[1, 1]), objective_value(modelo), value(Z)
+end
+
+function meses_seguintes(volume_antigo,vs,fmi, λ, num_cortes,mes_novo,chuva, num_termicas, num_hidreletricas, custos, demanda, pot_max)
+    modelo = Model(Gurobi.Optimizer)
+
+    @variable(modelo, 0 <= termicas_i[mes_novo, j = 1:num_termicas] <= pot_max[j])
+    @variable(modelo, hidreletrica_i[mes_novo, 1:num_hidreletricas] >= 0)
+    @variable(modelo, volume_i[mes_novo,1:num_hidreletricas] >= 0)
+    @variable(modelo, Z >= 0)
+    
+
+    @constraint(modelo, sum(termicas_i[mes_novo,j] for j in 1:num_termicas) + hidreletrica_i[mes_novo,1] == demanda)
+
+    
+    # for i in 1:num_hidreletricas
+    i = 1
+    balanco = @constraint(modelo, volume_i[mes_novo,i] == volume_antigo[i] - hidreletrica_i[mes_novo,i] + chuva)
+    # end
+    # Se tiver mais hidrelétricas tem um balanco para cada
+        
+    #Restrição Z
+    
+    
+    for e in 1:num_cortes
+        # print(fmi[mes_novo,e+1])
+        # print(vs[mes_novo,e+1])
+        # readline()
+        @constraint(modelo, Z >= λ[mes_novo,e+1]*((volume_i[mes_novo,1]-vs[mes_novo,e+1]))+fmi[mes_novo+1,e+1])
+    end
+
+   # readline()
+    @objective(modelo, Min, sum(custos[j] * termicas_i[mes_novo,j] for j in 1:num_termicas)+Z)
+    print(modelo) 
+    optimize!(modelo)
+    status = termination_status(modelo)
+    local λ_novo 
+    λ_novo = dual(balanco)
+    # println("Multiplicador de Lagrange", λ_novo)
+    # println("Volume final: ", value(volume_i[mes_novo,i]))
+    # println("Custo futuro: ", value(Z))
+    # println("Função Objetivo: ", objective_value(modelo))
+    # println("Mês: ", mes_novo)
+    # readline() 
+    return value(volume_i[mes_novo, i]), λ_novo, value(Z), objective_value(modelo) - value(Z)
+end
+
+function mes_final(volume_antigo,num_mes,chuva, num_termicas, num_hidreletricas, custos, demanda, pot_max)
+    modelo = Model(Gurobi.Optimizer)
+
+    @variable(modelo, 0 <= termicas_i[num_mes, j = 1:num_termicas] <= pot_max[j])
+    @variable(modelo, hidreletrica_i[num_mes, 1:num_hidreletricas] >= 0)
+    @variable(modelo, volume_i[num_mes,1:num_hidreletricas] >= 0)
+
+    @constraint(modelo, sum(termicas_i[num_mes,j] for j in 1:num_termicas) + hidreletrica_i[num_mes,1] == demanda)
+
+    
+    # for i in 1:num_hidreletricas
+    i = 1
+    balanco = @constraint(modelo, volume_i[num_mes,i] == volume_antigo[i] - hidreletrica_i[num_mes,i] + chuva)
+    # end
+
+   # readline()
+    @objective(modelo, Min, sum(custos[j] * termicas_i[num_mes,j] for j in 1:num_termicas))
+    print(modelo) 
+    # readline() 
+    optimize!(modelo)
+    status = termination_status(modelo)
+    local λ_novo 
+    λ_novo = dual(balanco)
+    println("Multiplicador de Lagrange", λ_novo)
+    println("Volume final: ", value(volume_i[num_mes,i]))
+    println("Função Objetivo: ", objective_value(modelo))
+    println("Mês: ", num_mes)
+    # readline() 
+    return value(volume_i[num_mes, i]), λ_novo, objective_value(modelo) 
+end
+
+function resolve_problema_todo(custos, demanda, num_hidreletricas, num_termicas, pot_max, num_mes, v0, num_cenarios)
+    m = num_mes
+    n = num_cenarios
+    fmi_cont = -100.0 
+    Z = rand()*10e5
+    Z_vet = []
+    vs = zeros(m,1) # Altere para um vetor vazio de Float64
+    fmi = zeros(m,1)
+    # fmi2 = [zeros(m,1)]
+    # println(fmi2)
+    # readline()
+    λ = zeros(m-1,1)  
+    num_cortes = 0
+    vs_novo = zeros(m,1)
+    fmi_novo = zeros(Float64, m, 1)
+    λ_novo = zeros(Float64, m-1, 1)
+
+    while abs(fmi_cont - Z) != 0 
+        saidas1 = primeiro_mes(num_cortes, fmi, λ, vs, custos, demanda, num_hidreletricas, num_termicas, pot_max, v0, num_cenarios)
+        
+        # print("aqui acaba mês 1")
+        # readline()
+        #Atualização Z para o mês 1
+        global fm1 =  saidas1[2]
+        fmi_novo[1] = saidas1[2]
+        vs_novo[1] = saidas1[1]
+        # push!(vs, vsi)  
+        v_anterior = saidas1[1]
+        Z = saidas1[3]
+        push!(Z_vet, Z)
+    
+        println("Saídas do Primeiro Mês:")
+        println("Volume Final: ", saidas1[1])
+        println("Custo Total: ", saidas1[2])
+        println("Z : ", saidas1[3])
+        println()
+
+        
+        # println(Z_vet)
+        # println(fmi)
+        # readline()
+        #saidas = zeros(num_cenarios)
+        # Iteração para os Meses seguintes
+        k = 1
+        for mes_novo in 2:num_mes-1
+            # for k in 1:num_cenarios
+                saidas2 = meses_seguintes(v_anterior, vs, fmi, λ,num_cortes,mes_novo,CH[k], num_termicas, num_hidreletricas, custos, demanda, pot_max)
+
+                fmi_novo[mes_novo] = saidas2[4]
+                λ_novo[mes_novo-1] = saidas2[2]
+                vs_novo[mes_novo] = saidas2[1]
+                v_anterior = saidas2[1]
+                # push!(matriz_Z, Z_vet)
+                println("Saídas do Mês $mes_novo para o cenário $k:")
+                println("Volume: ", saidas2[1])
+                println("Multiplicadores de Lagrange $k (λ): ", saidas2[2])
+                println("Corte/ Custo Futuro (Z): ", saidas2[3])
+                println("Custo Total: ", saidas2[4])
+                println()
+                readline()
+            #   print("\n Valor da função do mes 2 int $k \n ", fmi_novo)
+            # end
+        end
+
+        # num_mes = num_mes
+        # print(num_mes)
+        saidas3 = mes_final(v_anterior,num_mes,CH[k], num_termicas, num_hidreletricas, custos, demanda, pot_max)
+        fmi_novo[num_mes] = saidas3[3]
+        λ_novo[num_mes-1] = saidas3[2]
+        vs_novo[num_mes] = saidas3[1]
+        
+        readline()
+        fmi = hcat(fmi, fmi_novo)
+        println("Matriz de Funções objetivo: ",fmi)
+        # readline()
+
+        λ = hcat(λ, λ_novo)
+        println("Matriz de Multiplicadores de Lagrange: ", λ)
+
+        vs = hcat(vs, vs_novo)
+        println("Matriz de Vstar: ",vs)
+
+        fmi_cont = sum(fmi_novo)-fm1 
+        print("Contador: ", fmi_cont)
+        num_cortes += 1
+        readline()
+
+    end
+    return Z, fmi, vs, λ, fm1
+end
+
+
+saidas4 = resolve_problema_todo(custos, demanda, num_hidreletricas, num_termicas, pot_max, num_mes, v0, num_cenarios)
+println("Resultado Final:")
+println("Custo Total: ", saidas4[5] )
+println("Z: ", saidas4[1])
+println("fmi: ", saidas4[2])
+println("vs: ", saidas4[3])
+
+println("λ: ", saidas4[4])
